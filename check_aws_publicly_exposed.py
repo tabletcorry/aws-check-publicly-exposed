@@ -24,9 +24,10 @@ def check_if_exposed(sg):
             return True
     return False
 
-def get_port_exposed(client, region, sgs):
+def get_port_exposed(client, region, sgs, check_port=None):
     res = []
     response = client.describe_security_groups(GroupIds=sgs)
+    check_port_result = False
     for sg in response['SecurityGroups']:
         for permission in sg['IpPermissions']:
             if check_if_exposed(permission):
@@ -38,30 +39,53 @@ def get_port_exposed(client, region, sgs):
                     if permission['FromPort'] != permission['ToPort']:
                         port = "{0}/{1}-{2}".format(protocol, str(permission['FromPort']), str(permission['ToPort']))
                     res.append(port)
-    return res
+                    if check_port:
+                        from_port = int(permission['FromPort'])
+                        to_port = int(permission['ToPort'])
 
-def get_port_exposed_elb(listener_descriptions):
+                        check_port_result = check_port_result or from_port <= check_port <= to_port
+                elif 'FromPort' not in permission and 'ToPort' not in permission:
+                    check_port_result = True
+                else:
+                    raise Exception("Not sure what the ports are on this SG")
+    if check_port or check_port is None:
+        return res
+    else:
+        return None
+
+def get_port_exposed_elb(listener_descriptions, security_groups, ec2_client):
     res = []
     for listener in listener_descriptions:
-        port = "{0}->{1}".format(listener['Listener']['LoadBalancerPort'], listener['Listener']['InstancePort'])
-        res.append(port)
+        lb_port = listener['Listener']['LoadBalancerPort']
+        if lb_port:
+            result = get_port_exposed(ec2_client, None, security_groups, int(listener['Listener']['LoadBalancerPort']))
+            if result:
+                port = "{0}->{1}".format(lb_port, listener['Listener']['InstancePort'])
+                res.append(port)
+        else:
+            res.append("NO LB PORT?")
     return res
 
 def get_elb_ips(session, regions, account):
     res = []
     for region in regions:
         client = session.client('elb', region_name=region)
+        ec2_client = session.client('ec2', region_name=region)
         response = client.describe_load_balancers()
         for lb in response['LoadBalancerDescriptions']:
-            res += [
-                {
-                    'account': account,
-                    'service': 'elb',
-                    'name': lb['DNSName'],
-                    'sg': "NA",
-                    'port_exposed': get_port_exposed_elb(lb['ListenerDescriptions'])
-                }
-            ]
+            if lb['Scheme'] == 'internal':
+                continue
+            exposed_ports = get_port_exposed_elb(lb['ListenerDescriptions'], lb['SecurityGroups'], ec2_client)
+            if exposed_ports:
+                res += [
+                    {
+                        'account': account,
+                        'service': 'elb',
+                        'name': lb['DNSName'],
+                        'sg': lb['SecurityGroups'],
+                        'port_exposed': exposed_ports
+                    }
+                ]
     return res
 
 
@@ -81,16 +105,18 @@ def get_ec2_ips(session, regions, account):
                             add_to_list = True
                 if add_to_list:
                     sg_list = get_ec2_sg(instance['SecurityGroups'])
-                    res += [
-                        {
-                            'account': account,
-                            'service': 'ec2',
-                            'name': get_ec2_name(instance.get('Tags', {})) or  instance['InstanceId'],
-                            'ip_addresses': ip_list,
-                            'sg': sg_list,
-                            'port_exposed': get_port_exposed(client, region, sg_list)
-                        }
-                    ]
+                    exposed_ports = get_port_exposed(client, region, sg_list)
+                    if exposed_ports:
+                        res += [
+                            {
+                                'account': account,
+                                'service': 'ec2',
+                                'name': get_ec2_name(instance.get('Tags', {})) or  instance['InstanceId'],
+                                'ip_addresses': ip_list,
+                                'sg': sg_list,
+                                'port_exposed': exposed_ports
+                            }
+                        ]
     return res
 
 def get_regions(session):
