@@ -10,7 +10,7 @@ def get_ec2_name(tags):
     for tag in tags:
         if tag['Key'] == 'Name':
             return tag['Value']
-    return 'NA'
+    return None
 
 def get_ec2_sg(sgs):
     res = []
@@ -85,7 +85,7 @@ def get_ec2_ips(session, regions, account):
                         {
                             'account': account,
                             'service': 'ec2',
-                            'name': get_ec2_name(instance['Tags']),
+                            'name': get_ec2_name(instance.get('Tags', {})) or  instance['InstanceId'],
                             'ip_addresses': ip_list,
                             'sg': sg_list,
                             'port_exposed': get_port_exposed(client, region, sg_list)
